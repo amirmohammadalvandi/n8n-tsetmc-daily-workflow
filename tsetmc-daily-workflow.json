@@ -1,0 +1,312 @@
+{
+  "name": "Daily TSETMC price + option chain to Postgres",
+  "nodes": [
+    {
+      "parameters": {
+        "content": "## Daily TSETMC price + option chain -> Postgres\n\nEvery trading day (Sat-Wed, 15:00 Tehran time) this workflow:\n1. Fetches the daily price of ONE symbol from brsapi.ir and upserts it into `market.daily_prices`.\n2. Fetches the option chain, keeps contracts whose underlying is that symbol, and upserts them into `market.option_contracts`.\n\n### Setup\n1. Run `schema.sql` on your Postgres database (creates both tables).\n2. Create a Postgres credential and select it in both Postgres nodes.\n3. Get an API key from brsapi.ir and paste it into the `key` query parameter of BOTH HTTP Request nodes (Fetch Daily Price, Fetch Option Chain).\n4. Set `symbol` in the Config node (Persian ticker, e.g. اهرم).\n5. Workflow Settings -> Timezone -> Asia/Tehran.\n6. Execute each node once to test, then activate.\n\nTip: attach an Error Workflow (Error Trigger -> Telegram/Email) so failed runs don't go unnoticed.",
+        "height": 520,
+        "width": 560
+      },
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        -40,
+        -600
+      ],
+      "id": "e7dce3a6-7777-4f01-a38c-1e727d4fb1cb",
+      "name": "Setup Notes"
+    },
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "cronExpression",
+              "expression": "0 15 * * 6,0,1,2,3"
+            }
+          ]
+        }
+      },
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.4,
+      "position": [
+        0,
+        160
+      ],
+      "id": "9aa31a3f-fd6a-4aa0-9f45-69d09a8d00db",
+      "name": "Daily Trigger"
+    },
+    {
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "0832a0fc-60a9-4033-8301-a99e1124bdc6",
+              "name": "symbol",
+              "value": "اهرم",
+              "type": "string"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [
+        220,
+        160
+      ],
+      "id": "24846339-0b84-458a-8b5a-3663b11893e8",
+      "name": "Config"
+    },
+    {
+      "parameters": {
+        "method": "GET",
+        "url": "https://api.brsapi.ir/Tsetmc/History.php",
+        "authentication": "none",
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            {
+              "name": "key",
+              "value": "PASTE_YOUR_API_KEY_HERE"
+            },
+            {
+              "name": "type",
+              "value": "0"
+            },
+            {
+              "name": "l18",
+              "value": "={{ $json.symbol }}"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.5,
+      "position": [
+        460,
+        0
+      ],
+      "id": "c08245f3-1dc0-420c-87ab-74e9fece7f1d",
+      "name": "Fetch Daily Price",
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 5000
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "const j = $json;\nconst numFields = ['tno','tvol','tval','pmin','pmax','py','pf','pl','plc','plp','pc','pcc','pcp'];\n\nif (!j.date || !j.time) {\n  throw new Error('Unexpected API response (missing date/time): ' + JSON.stringify(j).slice(0, 300));\n}\n\nconst out = {\n  symbol: $('Config').first().json.symbol,\n  date: String(j.date),\n  time: String(j.time),\n};\n\nfor (const k of numFields) {\n  const raw = j[k];\n  const n = (raw === null || raw === undefined || raw === '') ? NaN : Number(raw);\n  if (!Number.isFinite(n)) {\n    throw new Error('Invalid or missing field \"' + k + '\": ' + raw);\n  }\n  out[k] = n;\n}\n\nreturn { json: out };"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        700,
+        0
+      ],
+      "id": "158476d8-daef-4e81-80ee-67dff8b5592c",
+      "name": "Prepare Price Row"
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "INSERT INTO market.daily_prices (\n    symbol, trade_date_jalali, time,\n    tno, tvol, tval, pmin, pmax, py, pf, pl, plc, plp, pc, pcc, pcp,\n    updated_at\n)\nVALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, NOW())\nON CONFLICT (symbol, trade_date_jalali)\nDO UPDATE SET\n    time = EXCLUDED.time,\n    tno = EXCLUDED.tno,\n    tvol = EXCLUDED.tvol,\n    tval = EXCLUDED.tval,\n    pmin = EXCLUDED.pmin,\n    pmax = EXCLUDED.pmax,\n    py = EXCLUDED.py,\n    pf = EXCLUDED.pf,\n    pl = EXCLUDED.pl,\n    plc = EXCLUDED.plc,\n    plp = EXCLUDED.plp,\n    pc = EXCLUDED.pc,\n    pcc = EXCLUDED.pcc,\n    pcp = EXCLUDED.pcp,\n    updated_at = NOW()\nRETURNING symbol, trade_date_jalali;",
+        "options": {
+          "queryReplacement": "={{ [$json.symbol, $json.date, $json.time, $json.tno, $json.tvol, $json.tval, $json.pmin, $json.pmax, $json.py, $json.pf, $json.pl, $json.plc, $json.plp, $json.pc, $json.pcc, $json.pcp] }}"
+        }
+      },
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.8,
+      "position": [
+        940,
+        0
+      ],
+      "id": "b1fbb2be-0b48-4273-b22e-3c31de3e1398",
+      "name": "Upsert Daily Price (Postgres)"
+    },
+    {
+      "parameters": {
+        "method": "GET",
+        "url": "https://api.brsapi.ir/Tsetmc/Option.php",
+        "authentication": "none",
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            {
+              "name": "key",
+              "value": "PASTE_YOUR_API_KEY_HERE"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.5,
+      "position": [
+        460,
+        320
+      ],
+      "id": "69a0ceaf-993e-4fc6-84be-d103190825ef",
+      "name": "Fetch Option Chain",
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 5000
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "8362f4ce-82e5-44be-b06c-b3f683119479",
+              "leftValue": "={{ $json.base_l18 }}",
+              "rightValue": "={{ $('Config').first().json.symbol }}",
+              "operator": {
+                "type": "string",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "looseTypeValidation": true,
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        700,
+        320
+      ],
+      "id": "88560c91-8d68-4a90-a5f6-fbae13ff7bc6",
+      "name": "Filter Target Underlying"
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "const j = $json;\n\nif (!j.isin) {\n  throw new Error('Missing isin: ' + JSON.stringify(j).slice(0, 300));\n}\n\n// Order must match $1..$32 in the SQL query. s = text, n = number.\nconst spec = [\n  ['isin','s'],\n  ['id','n'],\n  ['l18','s'],\n  ['l30','s'],\n  ['base_l18','s'],\n  ['base_id','n'],\n  ['base_pl','n'],\n  ['base_pc','n'],\n  ['base_py','n'],\n  ['base_pcp','n'],\n  ['type','s'],\n  ['date_begin','s'],\n  ['date_end','s'],\n  ['day_remain','n'],\n  ['size_contract','n'],\n  ['price_strike','n'],\n  ['interest_open','n'],\n  ['pl','n'],\n  ['pc','n'],\n  ['py','n'],\n  ['pf','n'],\n  ['pmin','n'],\n  ['pmax','n'],\n  ['tno','n'],\n  ['tvol','n'],\n  ['tval','n'],\n  ['nval','n'],\n  ['cs','s'],\n  ['cs_id','n'],\n  ['tmin','n'],\n  ['tmax','n'],\n  ['time','s']\n];\n\nconst params = spec.map(([key, type]) => {\n  const raw = j[key];\n  if (raw === null || raw === undefined || raw === '') return null;\n  if (type === 'n') {\n    const n = Number(raw);\n    return Number.isFinite(n) ? n : null;\n  }\n  return String(raw);\n});\n\nreturn { json: { params } };"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        940,
+        300
+      ],
+      "id": "d29f94a4-51f7-4dbf-9198-f0501d9f776a",
+      "name": "Prepare Option Row"
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "INSERT INTO market.option_contracts (\n    isin,\n    contract_id,\n    option_symbol,\n    contract_name,\n    underlying_symbol,\n    underlying_id,\n    underlying_last_price,\n    underlying_closing_price,\n    underlying_previous_price,\n    underlying_price_change_percent,\n    option_type,\n    start_date,\n    expiration_date,\n    days_remaining,\n    contract_size,\n    strike_price,\n    open_interest,\n    last_price,\n    closing_price,\n    previous_price,\n    first_price,\n    min_price,\n    max_price,\n    trade_count,\n    trade_volume,\n    trade_value,\n    notional_value,\n    industry,\n    industry_id,\n    lower_price_limit,\n    upper_price_limit,\n    snapshot_time,\n    last_updated_at\n)\nVALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28, $29, $30, $31, $32, NOW())\nON CONFLICT (isin)\nDO UPDATE SET\n    contract_id = EXCLUDED.contract_id,\n    option_symbol = EXCLUDED.option_symbol,\n    contract_name = EXCLUDED.contract_name,\n    underlying_symbol = EXCLUDED.underlying_symbol,\n    underlying_id = EXCLUDED.underlying_id,\n    underlying_last_price = EXCLUDED.underlying_last_price,\n    underlying_closing_price = EXCLUDED.underlying_closing_price,\n    underlying_previous_price = EXCLUDED.underlying_previous_price,\n    underlying_price_change_percent = EXCLUDED.underlying_price_change_percent,\n    option_type = EXCLUDED.option_type,\n    start_date = EXCLUDED.start_date,\n    expiration_date = EXCLUDED.expiration_date,\n    days_remaining = EXCLUDED.days_remaining,\n    contract_size = EXCLUDED.contract_size,\n    strike_price = EXCLUDED.strike_price,\n    open_interest = EXCLUDED.open_interest,\n    last_price = EXCLUDED.last_price,\n    closing_price = EXCLUDED.closing_price,\n    previous_price = EXCLUDED.previous_price,\n    first_price = EXCLUDED.first_price,\n    min_price = EXCLUDED.min_price,\n    max_price = EXCLUDED.max_price,\n    trade_count = EXCLUDED.trade_count,\n    trade_volume = EXCLUDED.trade_volume,\n    trade_value = EXCLUDED.trade_value,\n    notional_value = EXCLUDED.notional_value,\n    industry = EXCLUDED.industry,\n    industry_id = EXCLUDED.industry_id,\n    lower_price_limit = EXCLUDED.lower_price_limit,\n    upper_price_limit = EXCLUDED.upper_price_limit,\n    snapshot_time = EXCLUDED.snapshot_time,\n    last_updated_at = NOW()\nRETURNING isin;",
+        "options": {
+          "queryReplacement": "={{ $json.params }}"
+        }
+      },
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.8,
+      "position": [
+        1180,
+        300
+      ],
+      "id": "427dc6ef-ab9d-4b82-bb63-b7847045663a",
+      "name": "Upsert Option Contract (Postgres)"
+    }
+  ],
+  "connections": {
+    "Daily Trigger": {
+      "main": [
+        [
+          {
+            "node": "Config",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Config": {
+      "main": [
+        [
+          {
+            "node": "Fetch Daily Price",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Fetch Option Chain",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Fetch Daily Price": {
+      "main": [
+        [
+          {
+            "node": "Prepare Price Row",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Prepare Price Row": {
+      "main": [
+        [
+          {
+            "node": "Upsert Daily Price (Postgres)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Fetch Option Chain": {
+      "main": [
+        [
+          {
+            "node": "Filter Target Underlying",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Filter Target Underlying": {
+      "main": [
+        [
+          {
+            "node": "Prepare Option Row",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Prepare Option Row": {
+      "main": [
+        [
+          {
+            "node": "Upsert Option Contract (Postgres)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "pinData": {},
+  "settings": {
+    "executionOrder": "v1",
+    "timezone": "Asia/Tehran"
+  }
+}
